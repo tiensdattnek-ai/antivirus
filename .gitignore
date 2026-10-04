@@ -1,0 +1,20 @@
+# build artifacts
+build/
+dist/
+*.spec.bak
+__pycache__/
+*.pyc
+# engine binaries (build bang build.bat / make)
+core/*.dll
+core/*.so
+core/*.dylib
+core/*.obj
+core/*.exp
+core/*.lib
+# du lieu runtime
+logs/*.log*
+data/config.json
+quarantine/*.sxq
+# installer output
+Output/
+*_Setup.exe

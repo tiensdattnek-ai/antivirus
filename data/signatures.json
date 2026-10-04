@@ -1,0 +1,68 @@
+{
+  "version": "2026.10.04",
+  "hashes": {
+    "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f": "EICAR-Test-File (not a virus)"
+  },
+  "patterns": [
+    {
+      "name": "EICAR-Test-File",
+      "ascii": true,
+      "pattern": "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+      "severity": 100
+    },
+    {
+      "name": "Trojan.Generic.MeterpreterStager",
+      "ascii": true,
+      "pattern": "meterpreter",
+      "severity": 85
+    },
+    {
+      "name": "Backdoor.Script.NetcatShell",
+      "ascii": true,
+      "pattern": "nc -e cmd.exe",
+      "severity": 90
+    },
+    {
+      "name": "Ransom.Generic.ShadowDelete",
+      "ascii": true,
+      "pattern": "vssadmin delete shadows /all /quiet",
+      "severity": 95
+    },
+    {
+      "name": "Trojan.PS.EncodedCommand",
+      "ascii": true,
+      "pattern": "powershell -nop -w hidden -enc",
+      "severity": 88
+    },
+    {
+      "name": "Worm.Autorun.Inf",
+      "ascii": true,
+      "pattern": "[autorun]\nopen=",
+      "severity": 70
+    },
+    {
+      "name": "Hacktool.Mimikatz",
+      "ascii": true,
+      "pattern": "sekurlsa::logonpasswords",
+      "severity": 95
+    },
+    {
+      "name": "Trojan.VBS.Dropper",
+      "ascii": true,
+      "pattern": "CreateObject(\"WScript.Shell\").Run",
+      "severity": 65
+    },
+    {
+      "name": "Exploit.MSHTA.Remote",
+      "ascii": true,
+      "pattern": "mshta http",
+      "severity": 80
+    },
+    {
+      "name": "Trojan.Bin.ShellcodeEgg",
+      "ascii": false,
+      "pattern": "fc4883e4f0e8c0000000415141505251",
+      "severity": 92
+    }
+  ]
+}
