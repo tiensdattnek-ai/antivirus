@@ -1,8 +1,10 @@
-# 🛡️ SentinelX Antivirus 2.0 — Premium Security Suite
+# 🛡️ SentinelX Antivirus 2.1 — Premium Security Suite
 
 Phần mềm diệt virus cho **Windows** (chạy được cả Linux/macOS), **engine C++17 đa luồng** + **GUI Python (Tkinter)** giao diện tối cao cấp. Tự động quét, **phát hiện là xử lý ngay lập tức** (xoá vĩnh viễn hoặc cách ly mã hoá).
 
 ![screenshot](screenshot.png)
+
+> **Mới ở 2.1:** ⛨ Siêu bảo mật App (khoá ứng dụng bằng mật khẩu) · Tự bảo vệ chống báo nhầm chính mã nguồn · Phục hồi tất cả · Cập nhật CSDL online · Khởi động cùng Windows · Điểm bảo mật.
 
 ## 🚀 Chạy nhanh trên Windows
 ```bat
@@ -35,12 +37,43 @@ iscc installer.iss       :: cần Inno Setup 6  ->  SentinelX_Setup.exe
 ```
 > ⚠️ Vì exe thao tác xoá/ghi đè file, một số AV khác có thể cảnh báo *false positive* — hãy thêm ngoại lệ hoặc ký số (code signing) nếu phát hành rộng rãi.
 
+## ⛨ SIÊU BẢO MẬT APP (App Lock) — tính năng nổi bật
+
+![applock](screenshot_applock.png)
+
+Chọn ứng dụng cần bảo vệ (Chrome, Zalo, Messenger, thư mục ngân hàng, game…). Từ đó:
+
+1. Bạn mở ứng dụng → SentinelX phát hiện **tiến trình mới trong < 1 giây** và **kết thúc nó ngay**
+2. Cửa sổ nhập mật khẩu bật lên, luôn **nổi trên cùng** (`-topmost`, `grab_set`)
+3. **Nhập ĐÚNG** → ứng dụng tự được khởi chạy lại, có 25 giây ân hạn để không bị hỏi lặp
+4. **Nhập SAI (hoặc bấm Huỷ)** → **KHOÁ ứng dụng 3 phút**; trong thời gian đó mọi lần mở đều bị giết tiến trình ngay, kèm đếm ngược trong bảng
+
+| Chi tiết kỹ thuật | |
+|---|---|
+| Băm mật khẩu | **PBKDF2-HMAC-SHA256, 200.000 vòng, salt ngẫu nhiên 16 byte** — không lưu mật khẩu dạng rõ |
+| So sánh | `secrets.compare_digest` (chống timing attack) |
+| Giám sát tiến trình | `tasklist /FO CSV` (Windows) · `/proc` (Linux), chu kỳ 0.8s, chỉ xét **PID mới** |
+| Kết thúc tiến trình | `taskkill /F /T /PID` (diệt cả cây tiến trình con) |
+| Thêm ứng dụng | Duyệt file `.exe` **hoặc** chọn từ danh sách tiến trình đang chạy |
+| Lưu trữ | `data/applock.json` |
+
+## ✨ Các nâng cấp khác của 2.1
+- **Tự bảo vệ (self-protection):** engine C++ có API `sx_add_exclusion()`; thư mục cài đặt/mã nguồn SentinelX **không bao giờ bị quét hay xoá** → hết cảnh AV tự cách ly chính nó.
+- **Heuristic hiểu ngữ cảnh:** file `.cpp .py .json .md .txt .log .html`… bị **chia 4 điểm chuỗi** → không còn báo nhầm mã nguồn, tài liệu, log chứa từ khoá như `powershell -enc`.
+- **PHỤC HỒI TẤT CẢ:** một nút trả lại toàn bộ khu cách ly về đúng vị trí gốc (cứu false positive hàng loạt).
+- **Quản lý loại trừ** ngay trong Cài đặt (có hiển thị các mục `[tự bảo vệ]` không thể gỡ).
+- **Cập nhật CSDL chữ ký online** từ chính repo này (`app/updater.py`), tự chạy lúc khởi động.
+- **Khởi động cùng Windows** qua registry `HKCU\...\Run`, có kiểm tra quyền Admin.
+- **Điểm bảo mật 0–100** trên Dashboard (realtime + heuristic + app lock + auto-update + quyền admin).
+
 ## 🧩 Kiến trúc
 ```
 core/engine.cpp        Engine C++17 → sentinelx_core.dll / libsentinelx_core.so (C ABI)
 app/engine_bridge.py   ctypes binding + fallback thuần Python
 app/core_services.py   Config · Logger · Quarantine · Remediator · RealtimeGuard
 app/main.py            GUI Tkinter (dashboard, quét, đe doạ, cách ly, log, cài đặt)
+app/app_lock.py        ⛨ Siêu bảo mật App: PBKDF2, giám sát tiến trình, khoá 3 phút
+app/updater.py         Cập nhật CSDL online + khởi động cùng Windows + kiểm tra Admin
 app/cli.py             Quét bằng dòng lệnh
 data/signatures.json   CSDL chữ ký (hash SHA-256 + mẫu ASCII/HEX)
 quarantine/ logs/      Khu cách ly (mã hoá XOR) & nhật ký
@@ -64,6 +97,7 @@ quarantine/ logs/      Khu cách ly (mã hoá XOR) & nhật ký
 | Mối đe doạ | Báo cáo chi tiết: kết luận, mức nguy hiểm, SHA-256, hành động đã thực hiện |
 | Khu cách ly | Phục hồi / xoá vĩnh viễn / dọn sạch |
 | Nhật ký | Log thời gian thực, tự xoay vòng 4 MB |
+| ⛨ Siêu bảo mật App | Đặt/đổi mật khẩu, thêm–gỡ ứng dụng bảo vệ, xem trạng thái & đếm ngược khoá, mở khoá khẩn cấp |
 | Cài đặt | Realtime, tự động xử lý, heuristic, âm báo, chế độ xoá/cách ly, số luồng, dung lượng tối đa, thư mục giám sát |
 
 ## 🔒 Cơ chế xử lý

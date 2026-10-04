@@ -99,6 +99,7 @@ struct Engine {
   std::unordered_map<std::string, std::string> hashSigs;   // sha256 -> name
   std::vector<PatternSig> patSigs;
   std::unordered_set<std::string> whitelist;               // sha256 allow-list
+  std::vector<std::string> exclusions;                     // duong dan bi loai tru (self-protect)
   std::atomic<bool> heuristics{true};
   std::atomic<bool> stopFlag{false};
   std::atomic<uint64_t> scanned{0}, threats{0}, bytes{0};
@@ -132,6 +133,22 @@ static double entropy(const uint8_t* d, size_t n) {
 
 static std::string lower(std::string s){ for(auto&c:s) c=(char)std::tolower((unsigned char)c); return s; }
 
+static bool isExcluded(const std::string& path) {
+  std::string p = lower(path);
+  for (auto& e : g.exclusions) if (p.rfind(e, 0) == 0) return true;
+  return false;
+}
+
+/* File ma nguon / van ban: chua chuoi "nguy hiem" la binh thuong (bang signature,
+   tai lieu, log...). Khong duoc ket luan nhiem chi vi co chuoi. */
+static bool isSourceOrText(const std::string& ext) {
+  static const std::unordered_set<std::string> k = {
+    ".cpp",".cc",".cxx",".c",".h",".hpp",".py",".pyw",".java",".cs",".go",".rs",
+    ".json",".md",".txt",".log",".csv",".xml",".yml",".yaml",".ini",".cfg",".toml",
+    ".rst",".html",".htm",".css",".ts",".sql",".spec",".iss",".diff",".patch"};
+  return k.count(ext) > 0;
+}
+
 /* Heuristic rules applied on raw buffer + metadata. Returns severity (0 = clean). */
 static int heuristicScan(const std::vector<uint8_t>& b, const std::string& path, std::string& why) {
   int score = 0;
@@ -155,8 +172,14 @@ static int heuristicScan(const std::vector<uint8_t>& b, const std::string& path,
 
   std::string low; low.resize(std::min<size_t>(b.size(), 2u << 20));
   for (size_t i = 0; i < low.size(); i++) low[i] = (char)std::tolower(b[i]);
+  bool srcLike = isSourceOrText(ext);
+  int strScore = 0;
   for (size_t i = 0; i < sizeof(badstr)/sizeof(*badstr); i++)
-    if (low.find(badstr[i]) != std::string::npos) { score += badw[i]; why += std::string(badstr[i]) + "; "; }
+    if (low.find(badstr[i]) != std::string::npos) { strScore += badw[i]; why += std::string(badstr[i]) + "; "; }
+  /* File .cpp/.py/.json/.md... chi la van ban: ha diem manh de khong bao nham
+     ma nguon, CSDL chu ky, tai lieu, log cua chinh phan mem diet virus. */
+  if (srcLike) strScore /= 4;
+  score += strScore;
 
   // double extension trick:  invoice.pdf.exe
   std::string stem = lower(fs::path(path).stem().string());
@@ -175,6 +198,7 @@ static void pushResult(const std::string& line) {
 }
 
 static void scanFile(const fs::path& p) {
+  if (isExcluded(p.string())) return;
   std::error_code ec;
   auto sz = fs::file_size(p, ec);
   if (ec) return;
@@ -262,6 +286,15 @@ SX_API void sx_reset_signatures() { g.hashSigs.clear(); g.patSigs.clear(); g.whi
 SX_API void sx_add_hash_sig(const char* sha256hex, const char* name) { g.hashSigs[lower(sha256hex)] = name; }
 
 SX_API void sx_add_whitelist(const char* sha256hex) { g.whitelist.insert(lower(sha256hex)); }
+
+/* Loai tru mot thu muc/file khoi moi hoat dong quet (dung cho self-protection). */
+SX_API void sx_add_exclusion(const char* path) {
+  std::string p = lower(path);
+  while (!p.empty() && (p.back() == '/' || p.back() == '\\')) p.pop_back();
+  if (!p.empty()) g.exclusions.push_back(p);
+}
+SX_API void sx_clear_exclusions() { g.exclusions.clear(); }
+SX_API int  sx_is_excluded(const char* path) { return isExcluded(path) ? 1 : 0; }
 
 /* hexpat: hex string e.g. "4d5a9000" ; or ascii if is_ascii != 0 */
 SX_API void sx_add_pattern_sig(const char* pat, int is_ascii, const char* name, int severity) {

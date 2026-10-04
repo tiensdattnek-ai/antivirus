@@ -36,6 +36,7 @@ class _Base:
     def add_hash_sig(self, sha, name): ...
     def add_pattern_sig(self, pat, is_ascii, name, sev): ...
     def add_whitelist(self, sha): ...
+    def add_exclusion(self, path): ...
     def reset_signatures(self): ...
     def set_heuristics(self, on): ...
     def scan_start(self, roots, threads=0): ...
@@ -56,6 +57,8 @@ class NativeEngine(_Base):
         L.sx_version.restype = ctypes.c_char_p
         L.sx_add_hash_sig.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
         L.sx_add_whitelist.argtypes = [ctypes.c_char_p]
+        L.sx_add_exclusion.argtypes = [ctypes.c_char_p]
+        L.sx_is_excluded.argtypes = [ctypes.c_char_p]
         L.sx_add_pattern_sig.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
         L.sx_set_heuristics.argtypes = [ctypes.c_int]
         L.sx_set_max_size.argtypes = [ctypes.c_longlong]
@@ -74,6 +77,9 @@ class NativeEngine(_Base):
     def reset_signatures(self): self.lib.sx_reset_signatures()
     def add_hash_sig(self, sha, name): self.lib.sx_add_hash_sig(self._b(sha), self._b(name))
     def add_whitelist(self, sha): self.lib.sx_add_whitelist(self._b(sha))
+    def add_exclusion(self, path): self.lib.sx_add_exclusion(self._b(path))
+    def clear_exclusions(self): self.lib.sx_clear_exclusions()
+    def is_excluded(self, path): return bool(self.lib.sx_is_excluded(self._b(path)))
     def add_pattern_sig(self, pat, is_ascii, name, sev):
         self.lib.sx_add_pattern_sig(self._b(pat), 1 if is_ascii else 0, self._b(name), int(sev))
     def set_heuristics(self, on): self.lib.sx_set_heuristics(1 if on else 0)
@@ -116,6 +122,7 @@ class PyEngine(_Base):
 
     def __init__(self):
         self.hash_sigs, self.pat_sigs, self.white = {}, [], set()
+        self.exclusions = []
         self.heur = True
         self.max_size = 256 * 1024 * 1024
         self._q: "queue.Queue[str]" = queue.Queue()
@@ -126,6 +133,12 @@ class PyEngine(_Base):
     def reset_signatures(self): self.hash_sigs.clear(); self.pat_sigs.clear(); self.white.clear()
     def add_hash_sig(self, sha, name): self.hash_sigs[sha.lower()] = name
     def add_whitelist(self, sha): self.white.add(sha.lower())
+    def add_exclusion(self, path):
+        self.exclusions.append(str(path).lower().rstrip("/\\"))
+    def clear_exclusions(self): self.exclusions.clear()
+    def is_excluded(self, path):
+        p = str(path).lower()
+        return any(p.startswith(e) for e in self.exclusions)
     def add_pattern_sig(self, pat, is_ascii, name, sev):
         raw = pat.encode() if is_ascii else bytes.fromhex(pat)
         self.pat_sigs.append((raw, name, sev))
@@ -148,7 +161,13 @@ class PyEngine(_Base):
         n = len(data)
         return -sum((c / n) * math.log2(c / n) for c in f if c)
 
+    SRC_EXT = {".cpp",".cc",".c",".h",".hpp",".py",".pyw",".java",".cs",".go",".rs",
+               ".json",".md",".txt",".log",".csv",".xml",".yml",".yaml",".ini",".cfg",
+               ".toml",".rst",".html",".htm",".css",".ts",".sql",".spec",".iss"}
+
     def _check(self, path):
+        if self.is_excluded(path):
+            return None
         try:
             sz = os.path.getsize(path)
         except OSError:
@@ -170,9 +189,13 @@ class PyEngine(_Base):
         if self.heur:
             score, why = 0, []
             low = data[:2 << 20].lower()
-            for s, w in BAD_STRINGS:
-                if s.lower() in low: score += w; why.append(s.decode())
             ext = Path(path).suffix.lower()
+            str_score = 0
+            for s, w in BAD_STRINGS:
+                if s.lower() in low: str_score += w; why.append(s.decode())
+            if ext in self.SRC_EXT:      # mã nguồn / văn bản: hạ điểm mạnh
+                str_score //= 4
+            score += str_score
             if data[:2] == b"MZ" and self.entropy(data[:1 << 20]) > 7.2:
                 score += 45; why.append("PE entropy cao")
             if ext in (".exe", ".scr", ".bat", ".com", ".pif") and re.search(r"\.(pdf|doc|jpg|txt)$", Path(path).stem, re.I):

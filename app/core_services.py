@@ -50,6 +50,8 @@ DEFAULTS = {
     "exclusions": [],
     "theme": "dark",
     "sound": True,
+    "auto_update": True,
+    "startup": False,
     "schedule_enabled": False,
     "schedule_time": "02:00",
 }
@@ -172,8 +174,24 @@ class Quarantine:
         self.log.info(f"Đã xoá vĩnh viễn khỏi khu cách ly: {m['original']}")
         return True
 
+    def restore_all(self) -> int:
+        n = 0
+        for qid in list(self.index):
+            if self.restore(qid): n += 1
+        return n
+
     def empty(self):
         for qid in list(self.index): self.delete(qid)
+
+
+# Thư mục của chính SentinelX — TUYỆT ĐỐI không bao giờ tự quét/tự xoá
+SELF_PATHS = {str(ROOT).lower(), str(BUNDLE).lower(),
+              str(Path(__file__).resolve().parent.parent).lower()}
+
+
+def is_self_path(path) -> bool:
+    p = str(path).lower().replace("\\", "/")
+    return any(p.startswith(sp.replace("\\", "/")) for sp in SELF_PATHS)
 
 
 class Remediator:
@@ -182,6 +200,9 @@ class Remediator:
 
     def handle(self, path, threat, sha="") -> str:
         """Trả về hành động đã thực hiện: deleted | quarantined | failed | skipped"""
+        if is_self_path(path):
+            self.log.warn(f"TỰ BẢO VỆ: bỏ qua file của chính SentinelX — {path}")
+            return "skipped"
         if any(str(path).lower().startswith(str(e).lower()) for e in self.cfg["exclusions"]):
             return "skipped"
         if self.cfg["action"] == "delete":

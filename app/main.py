@@ -23,8 +23,11 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core_services import Config, Logger, Quarantine, RealtimeGuard, Remediator, ROOT, DATA  # noqa
+from core_services import (Config, Logger, Quarantine, RealtimeGuard, Remediator,
+                           ROOT, DATA, BUNDLE, SELF_PATHS)  # noqa
 from engine_bridge import load_engine  # noqa
+from app_lock import AppLockManager, PENALTY_SECONDS  # noqa
+import updater  # noqa
 
 # ----------------------------------------------------------------- Bảng màu
 C = {
@@ -157,6 +160,9 @@ class SentinelX(tk.Tk):
         self.quar = Quarantine(self.log)
         self.rem = Remediator(self.cfg, self.quar, self.log)
         self.guard = RealtimeGuard(self.engine, self.cfg, self.rem, self.log, self.on_guard_event)
+        self.applock = AppLockManager(DATA, self.log,
+                                      prompt_cb=lambda n, a: self.after(0, self.prompt_password, n, a),
+                                      notify_cb=lambda k, d: self.after(0, self.on_lock_event, k, d))
 
         self.threat_rows = []
         self.scan_start_ts = 0
@@ -167,12 +173,17 @@ class SentinelX(tk.Tk):
         self._style()
         self._build()
         self.load_signatures()
+        self.register_self_protection()
 
         self.log.listeners.append(lambda lv, m: self.after(0, self._append_log, lv, m))
         self.log.info(f"Khởi động SentinelX — engine: {self.engine.backend} / {self.engine.version}")
 
         if self.cfg["realtime"]:
             self.guard.start()
+        if self.applock.db.get("enabled") and self.applock.has_password:
+            self.applock.start()
+        if self.cfg.get("auto_update"):
+            threading.Thread(target=self.do_update_signatures, args=(True,), daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(60, self.animate)
         self.after(300, self.poll_engine)
@@ -213,6 +224,7 @@ class SentinelX(tk.Tk):
 
         for key, label, icon in [("dash", "Tổng quan", "⬢"), ("scan", "Quét virus", "◎"),
                                  ("threats", "Mối đe doạ", "⚠"), ("quar", "Khu cách ly", "▣"),
+                                 ("lock", "Siêu bảo mật App", "◈"),
                                  ("logs", "Nhật ký", "☰"), ("set", "Cài đặt", "⚙")]:
             b = tk.Label(side, text=f"   {icon}   {label}", anchor="w", bg=C["bg2"], fg=C["muted"],
                          font=F(11, "bold"), padx=12, pady=12)
@@ -229,6 +241,7 @@ class SentinelX(tk.Tk):
         self.cur = "dash"
         for k, builder in [("dash", self.page_dash), ("scan", self.page_scan),
                            ("threats", self.page_threats), ("quar", self.page_quar),
+                           ("lock", self.page_lock),
                            ("logs", self.page_logs), ("set", self.page_settings)]:
             p = tk.Frame(container, bg=C["bg"])
             self.pages[k] = p
@@ -243,6 +256,7 @@ class SentinelX(tk.Tk):
             b.config(fg=C["txt"] if k == key else C["muted"],
                      bg=C["card"] if k == key else C["bg2"])
         if key == "quar": self.refresh_quar()
+        if key == "lock": self.refresh_locks()
 
     @staticmethod
     def header(parent, title, sub):
@@ -260,7 +274,9 @@ class SentinelX(tk.Tk):
         self.gauge = Gauge(left); self.gauge.pack(padx=20, pady=16)
         self.status_line = tk.Label(left, text="Không phát hiện mối đe doạ nào", bg=C["card"],
                                     fg=C["accent"], font=F(11, "bold"))
-        self.status_line.pack(pady=(0, 14))
+        self.status_line.pack(pady=(0, 4))
+        self.score_line = tk.Label(left, text="", bg=C["card"], fg=C["muted"], font=F(9))
+        self.score_line.pack(pady=(0, 14))
 
         right = tk.Frame(top, bg=C["bg"]); right.pack(side="left", fill="both", expand=True)
         grid = tk.Frame(right, bg=C["bg"]); grid.pack(fill="x")
@@ -353,6 +369,237 @@ class SentinelX(tk.Tk):
         GlowButton(row, "XOÁ VĨNH VIỄN", self.do_qdelete, fill=C["danger"], fg="#fff", icon="✖", w=180).pack(side="left", padx=10)
         GlowButton(row, "DỌN SẠCH", self.do_qempty, fill=C["card2"], fg=C["txt"],
                    outline=C["stroke"], icon="✦", w=150).pack(side="left")
+        GlowButton(row, "PHỤC HỒI TẤT CẢ", self.do_restore_all, fill=C["purple"], fg="#fff",
+                   icon="↺", w=200).pack(side="left", padx=10)
+
+
+    # ---------------------------------------------------------- page: app lock
+    def page_lock(self, p):
+        self.header(p, "◈  Siêu bảo mật App",
+                    "Khoá ứng dụng bằng mật khẩu — mở app được bảo vệ sẽ bị chặn cho tới khi nhập đúng mật khẩu")
+
+        wrap = tk.Frame(p, bg=C["bg"]); wrap.pack(fill="both", expand=True, padx=26, pady=(0, 20))
+
+        # --- hàng 1: mật khẩu + công tắc
+        top = Card(wrap); top.pack(fill="x")
+        r = tk.Frame(top, bg=C["card"]); r.pack(fill="x", padx=16, pady=14)
+        tk.Label(r, text="Mật khẩu bảo vệ", bg=C["card"], fg=C["txt"], font=F(12, "bold")).grid(row=0, column=0, sticky="w", columnspan=4)
+        self.lock_state_lbl = tk.Label(r, text="", bg=C["card"], fg=C["warn"], font=F(9))
+        self.lock_state_lbl.grid(row=1, column=0, sticky="w", columnspan=4, pady=(0, 8))
+
+        tk.Label(r, text="Mật khẩu hiện tại:", bg=C["card"], fg=C["muted"], font=F(10)).grid(row=2, column=0, sticky="w", pady=4)
+        self.pw_old = tk.Entry(r, show="•", width=22, bg=C["card2"], fg=C["txt"], insertbackground=C["txt"],
+                               bd=0, highlightthickness=1, highlightbackground=C["stroke"])
+        self.pw_old.grid(row=2, column=1, padx=8, pady=4, ipady=4)
+        tk.Label(r, text="Mật khẩu mới:", bg=C["card"], fg=C["muted"], font=F(10)).grid(row=2, column=2, sticky="w", padx=(16, 0))
+        self.pw_new = tk.Entry(r, show="•", width=22, bg=C["card2"], fg=C["txt"], insertbackground=C["txt"],
+                               bd=0, highlightthickness=1, highlightbackground=C["stroke"])
+        self.pw_new.grid(row=2, column=3, padx=8, pady=4, ipady=4)
+        tk.Label(r, text="Nhập lại:", bg=C["card"], fg=C["muted"], font=F(10)).grid(row=2, column=4, sticky="w", padx=(16, 0))
+        self.pw_new2 = tk.Entry(r, show="•", width=22, bg=C["card2"], fg=C["txt"], insertbackground=C["txt"],
+                                bd=0, highlightthickness=1, highlightbackground=C["stroke"])
+        self.pw_new2.grid(row=2, column=5, padx=8, pady=4, ipady=4)
+        GlowButton(r, "LƯU MẬT KHẨU", self.do_set_password, w=170, h=34, icon="✔").grid(row=2, column=6, padx=14)
+
+        sw = tk.Frame(top, bg=C["card"]); sw.pack(fill="x", padx=16, pady=(0, 14))
+        self.lock_enabled = tk.BooleanVar(value=bool(self.applock.active))
+        tk.Checkbutton(sw, variable=self.lock_enabled, text="  BẬT Siêu bảo mật App (giám sát tiến trình liên tục)",
+                       bg=C["card"], fg=C["accent"], selectcolor=C["card2"], activebackground=C["card"],
+                       activeforeground=C["accent"], font=F(11, "bold"), bd=0, highlightthickness=0,
+                       command=self.toggle_applock).pack(side="left")
+        tk.Label(sw, text=f"   Nhập sai → khoá ứng dụng {PENALTY_SECONDS // 60} phút",
+                 bg=C["card"], fg=C["danger"], font=F(9, "bold")).pack(side="left")
+
+        # --- hàng 2: danh sách app
+        card = Card(wrap); card.pack(fill="both", expand=True, pady=14)
+        tk.Label(card, text="Ứng dụng đang được bảo vệ", bg=C["card"], fg=C["txt"],
+                 font=F(12, "bold")).pack(anchor="w", padx=16, pady=(14, 8))
+        cols = ("app", "path", "status", "added")
+        self.ltree = ttk.Treeview(card, columns=cols, show="headings", height=9)
+        for c, t, w in [("app", "Ứng dụng", 200), ("path", "Đường dẫn", 480),
+                        ("status", "Trạng thái", 190), ("added", "Thêm lúc", 160)]:
+            self.ltree.heading(c, text=t); self.ltree.column(c, width=w)
+        self.ltree.tag_configure("locked", foreground=C["danger"])
+        self.ltree.tag_configure("open", foreground=C["accent"])
+        self.ltree.pack(fill="both", expand=True, padx=16)
+
+        row = tk.Frame(card, bg=C["card"]); row.pack(anchor="w", padx=16, pady=12)
+        GlowButton(row, "THÊM ỨNG DỤNG", self.do_add_lock_app, w=200, icon="＋").pack(side="left")
+        GlowButton(row, "TỪ APP ĐANG CHẠY", self.do_add_running, fill=C["accent2"], w=215, icon="◎").pack(side="left", padx=10)
+        GlowButton(row, "GỠ BẢO VỆ", self.do_remove_lock_app, fill=C["danger"], fg="#fff", w=165, icon="✖").pack(side="left")
+        GlowButton(row, "MỞ KHOÁ NGAY", self.do_unlock_now, fill=C["card2"], fg=C["txt"],
+                   outline=C["stroke"], w=185, icon="↺").pack(side="left", padx=10)
+
+    # ---------------------------------------------------------- app lock ops
+    def refresh_locks(self):
+        if not hasattr(self, "ltree"): return
+        self.ltree.delete(*self.ltree.get_children())
+        for key, a in self.applock.apps().items():
+            st = self.applock.status_of(key)
+            tag = "locked" if "KHOÁ" in st else ("open" if "mở khoá" in st else "")
+            self.ltree.insert("", "end", iid=key,
+                              values=(a.get("label", key), a["path"], st, a.get("added", "")),
+                              tags=(tag,))
+        self.lock_state_lbl.config(
+            text=("✔ Đã đặt mật khẩu — " + ("ĐANG BẬT bảo vệ" if self.applock.active else "đang TẮT")
+                  if self.applock.has_password else
+                  "⚠ Chưa đặt mật khẩu — hãy đặt mật khẩu trước khi bật tính năng này"),
+            fg=(C["accent"] if self.applock.has_password and self.applock.active else C["warn"]))
+
+    def do_set_password(self):
+        new, new2 = self.pw_new.get(), self.pw_new2.get()
+        if new != new2:
+            messagebox.showerror("SentinelX", "Hai mật khẩu mới không khớp."); return
+        ok, msg = self.applock.set_password(new, self.pw_old.get())
+        (messagebox.showinfo if ok else messagebox.showerror)("SentinelX", msg)
+        if ok:
+            for e in (self.pw_old, self.pw_new, self.pw_new2): e.delete(0, "end")
+        self.refresh_locks()
+
+    def toggle_applock(self):
+        if self.lock_enabled.get():
+            if not self.applock.has_password:
+                messagebox.showwarning("SentinelX", "Hãy đặt mật khẩu trước đã!")
+                self.lock_enabled.set(False); return
+            if not self.applock.apps():
+                messagebox.showinfo("SentinelX", "Hãy thêm ít nhất một ứng dụng cần bảo vệ.")
+            self.applock.start()
+        else:
+            self.applock.stop()
+        self.refresh_locks()
+
+    def do_add_lock_app(self):
+        ft = [("Ứng dụng", "*.exe"), ("Tất cả", "*.*")] if os.name == "nt" else [("Tất cả", "*.*")]
+        f = filedialog.askopenfilename(title="Chọn ứng dụng cần bảo vệ", filetypes=ft)
+        if not f: return
+        ok, msg = self.applock.add_app(f)
+        (messagebox.showinfo if ok else messagebox.showerror)("SentinelX", msg)
+        self.refresh_locks()
+
+    def do_add_running(self):
+        """Chọn nhanh từ danh sách tiến trình đang chạy."""
+        from app_lock import list_processes
+        names = sorted(set(list_processes().values()))
+        win = tk.Toplevel(self); win.title("Chọn ứng dụng đang chạy")
+        win.configure(bg=C["bg"]); win.geometry("420x480"); win.transient(self); win.grab_set()
+        tk.Label(win, text="Tiến trình đang chạy", bg=C["bg"], fg=C["txt"], font=F(12, "bold")).pack(pady=10)
+        lb = tk.Listbox(win, bg=C["card2"], fg=C["txt"], bd=0, highlightthickness=0, font=F(10))
+        lb.pack(fill="both", expand=True, padx=14)
+        for n in names: lb.insert("end", n)
+
+        def pick():
+            if not lb.curselection(): return
+            name = lb.get(lb.curselection()[0])
+            path = filedialog.askopenfilename(title=f"Trỏ tới tệp thực thi của {name}")
+            if path:
+                ok, msg = self.applock.add_app(path, label=name)
+                (messagebox.showinfo if ok else messagebox.showerror)("SentinelX", msg)
+                self.refresh_locks(); win.destroy()
+        GlowButton(win, "BẢO VỆ APP NÀY", pick, w=220, icon="◈").pack(pady=12)
+
+    def do_remove_lock_app(self):
+        for k in self.ltree.selection(): self.applock.remove_app(k)
+        self.refresh_locks()
+
+    def do_unlock_now(self):
+        for k in self.ltree.selection(): self.applock.unlock_now(k)
+        self.refresh_locks()
+
+    def on_lock_event(self, kind, data):
+        app = data.get("app", "?")
+        if kind == "locked":
+            self.activity_add(f"◈ CHẶN {app} — còn khoá {data['remain']}s")
+        elif kind == "unlocked":
+            self.activity_add(f"◈ Mở khoá {app} — đang khởi chạy lại")
+        elif kind == "penalty":
+            self.activity_add(f"◈ SAI MẬT KHẨU → khoá {app} {data['seconds']//60} phút")
+            if self.cfg["sound"]:
+                try: self.bell()
+                except Exception: pass
+        self.refresh_locks()
+
+    # ---------------------------------------------------------- hộp mật khẩu
+    def prompt_password(self, name, app):
+        """Cửa sổ yêu cầu mật khẩu — luôn nổi lên trên cùng."""
+        label = app.get("label", name)
+        win = tk.Toplevel(self)
+        win.title("SentinelX — Siêu bảo mật App")
+        win.configure(bg=C["bg2"]); win.geometry("460x300")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.transient(self); win.grab_set()
+        try:
+            self.deiconify(); self.lift(); win.focus_force()
+        except Exception:
+            pass
+
+        tk.Label(win, text="◈", bg=C["bg2"], fg=C["accent"], font=F(34, "bold")).pack(pady=(18, 0))
+        tk.Label(win, text="ỨNG DỤNG ĐƯỢC BẢO VỆ", bg=C["bg2"], fg=C["txt"], font=F(14, "bold")).pack()
+        tk.Label(win, text=f"{label}  đã bị chặn. Nhập mật khẩu để mở.", bg=C["bg2"],
+                 fg=C["muted"], font=F(10), wraplength=400).pack(pady=(4, 2))
+        warn = tk.Label(win, text=f"Nhập sai → khoá ứng dụng {PENALTY_SECONDS // 60} phút",
+                        bg=C["bg2"], fg=C["danger"], font=F(9, "bold"))
+        warn.pack()
+
+        ent = tk.Entry(win, show="●", font=F(14), justify="center", bg=C["card2"], fg=C["txt"],
+                       insertbackground=C["accent"], bd=0, highlightthickness=2,
+                       highlightbackground=C["stroke"], highlightcolor=C["accent"])
+        ent.pack(pady=14, ipady=8, padx=60, fill="x")
+        ent.focus_set()
+
+        done = {"v": False}
+
+        def finish(ok):
+            if done["v"]: return
+            done["v"] = True
+            try: win.grab_release(); win.destroy()
+            except Exception: pass
+            self.applock.resolve(name, ok)
+
+        def submit(*_):
+            if self.applock.check(ent.get()):
+                finish(True)
+            else:
+                warn.config(text="✖ SAI MẬT KHẨU — ứng dụng bị khoá 3 phút!")
+                win.after(700, lambda: finish(False))
+
+        ent.bind("<Return>", submit)
+        rowb = tk.Frame(win, bg=C["bg2"]); rowb.pack(pady=4)
+        GlowButton(rowb, "MỞ KHOÁ", submit, w=160, icon="▸").pack(side="left", padx=6)
+        GlowButton(rowb, "HUỶ", lambda: finish(False), w=120, fill=C["card2"], fg=C["txt"],
+                   outline=C["stroke"], icon="✖").pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+
+    # ---------------------------------------------------------- tự bảo vệ
+    def register_self_protection(self):
+        """KHÔNG BAO GIỜ quét/xoá chính mã nguồn & dữ liệu của SentinelX."""
+        paths = set(SELF_PATHS) | {str(ROOT), str(BUNDLE)}
+        n = 0
+        if hasattr(self.engine, "add_exclusion"):
+            for p in paths:
+                self.engine.add_exclusion(p); n += 1
+            for p in self.cfg.get("exclusions", []):
+                self.engine.add_exclusion(p); n += 1
+        self.log.info(f"Tự bảo vệ: loại trừ {n} đường dẫn khỏi phạm vi quét")
+
+    def do_restore_all(self):
+        if not self.quar.index: return
+        if messagebox.askyesno("Xác nhận",
+                               f"Phục hồi TẤT CẢ {len(self.quar.index)} mục trong khu cách ly?\n"
+                               "Dùng khi bị báo nhầm (false positive)."):
+            n = self.quar.restore_all()
+            messagebox.showinfo("SentinelX", f"Đã phục hồi {n} tệp về vị trí gốc.")
+            self.refresh_quar()
+
+    def do_update_signatures(self, silent=False):
+        ok, msg = updater.update_signatures(DATA / "signatures.json", self.log)
+        try:                       # cửa sổ có thể đã đóng khi luồng nền chạy xong
+            if not self.winfo_exists(): return
+            if ok: self.after(0, self.load_signatures)
+            if not silent: self.after(0, lambda: messagebox.showinfo("Cập nhật CSDL", msg))
+            self.after(0, self.activity_add, ("↓ " if ok else "• ") + msg)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------- page: logs
     def page_logs(self, p):
@@ -387,6 +634,8 @@ class SentinelX(tk.Tk):
         toggle("auto_delete", "Tự động xử lý khi phát hiện", "Xoá hoặc cách ly ngay mà không cần hỏi")
         toggle("heuristics", "Phân tích heuristic", "Phát hiện mã độc chưa có chữ ký (entropy, hành vi, chuỗi nguy hiểm)")
         toggle("sound", "Cảnh báo âm thanh", "Phát tiếng bíp khi phát hiện mối đe doạ")
+        toggle("auto_update", "Tự động cập nhật CSDL chữ ký", "Tải danh sách mã độc mới nhất khi khởi động")
+        toggle("startup", "Khởi động cùng Windows", "SentinelX tự chạy nền ngay khi đăng nhập")
 
         r = tk.Frame(card, bg=C["card"]); r.pack(fill="x", padx=16, pady=12)
         tk.Label(r, text="Hành động khi phát hiện:", bg=C["card"], fg=C["txt"], font=F(11, "bold")).pack(side="left")
@@ -408,6 +657,8 @@ class SentinelX(tk.Tk):
                  insertbackground=C["txt"], bd=0, highlightthickness=1,
                  highlightbackground=C["stroke"]).pack(side="left", padx=8)
         GlowButton(r2, "LƯU", self.save_settings, w=110, h=34, icon="▼").pack(side="left", padx=16)
+        GlowButton(r2, "CẬP NHẬT CSDL", lambda: threading.Thread(target=self.do_update_signatures,
+                   daemon=True).start(), w=190, h=34, fill=C["accent2"], icon="↓").pack(side="left")
 
         card2 = Card(wrap); card2.pack(fill="both", expand=True, pady=14)
         tk.Label(card2, text="Thư mục giám sát thời gian thực", bg=C["card"], fg=C["txt"],
@@ -419,7 +670,21 @@ class SentinelX(tk.Tk):
         GlowButton(rr, "THÊM", self.add_watch, w=120, h=34, icon="＋").pack(side="left")
         GlowButton(rr, "XOÁ", self.del_watch, w=120, h=34, fill=C["card2"], fg=C["txt"],
                    outline=C["stroke"], icon="－").pack(side="left", padx=10)
-        tk.Label(card2, text=f"Engine: {self.engine.backend} — {self.engine.version}",
+        tk.Label(card2, text="Thư mục loại trừ (không quét / không xoá)", bg=C["card"], fg=C["txt"],
+                 font=F(11, "bold")).pack(anchor="w", padx=16, pady=(10, 4))
+        self.exclbox = tk.Listbox(card2, bg=C["card2"], fg=C["muted"], bd=0, highlightthickness=0,
+                                  font=F(9), height=4)
+        self.exclbox.pack(fill="x", padx=16)
+        for e in sorted(SELF_PATHS): self.exclbox.insert("end", f"[tự bảo vệ] {e}")
+        for e in self.cfg["exclusions"]: self.exclbox.insert("end", e)
+        rx = tk.Frame(card2, bg=C["card"]); rx.pack(anchor="w", padx=16, pady=8)
+        GlowButton(rx, "THÊM LOẠI TRỪ", self.add_exclusion, w=180, h=32, fill=C["card2"],
+                   fg=C["txt"], outline=C["stroke"], icon="＋").pack(side="left")
+        GlowButton(rx, "BỎ", self.del_exclusion, w=90, h=32, fill=C["card2"], fg=C["txt"],
+                   outline=C["stroke"], icon="－").pack(side="left", padx=10)
+
+        tk.Label(card2, text=f"Engine: {self.engine.backend} — {self.engine.version}  |  "
+                             f"Quyền Admin: {'CÓ' if updater.is_admin() else 'KHÔNG'}",
                  bg=C["card"], fg=C["muted"], font=F(9)).pack(anchor="w", padx=16, pady=(0, 12))
 
     # ---------------------------------------------------------- signatures
@@ -593,6 +858,9 @@ class SentinelX(tk.Tk):
             self.guard.start() if self.cfg["realtime"] else self.guard.stop()
         if key == "heuristics":
             self.engine.set_heuristics(self.cfg["heuristics"])
+        if key == "startup":
+            ok, msg = updater.set_run_at_startup(self.cfg["startup"])
+            self.log.info(msg) if ok else self.log.warn(msg)
 
     def apply_action(self):
         self.cfg["action"] = self.action_var.get(); self.cfg.save()
@@ -615,6 +883,24 @@ class SentinelX(tk.Tk):
         d = filedialog.askdirectory(title="Chọn thư mục giám sát")
         if d: self.watchbox.insert("end", d)
 
+    def add_exclusion(self):
+        d = filedialog.askdirectory(title="Chọn thư mục loại trừ")
+        if d:
+            self.cfg["exclusions"].append(d); self.cfg.save()
+            self.exclbox.insert("end", d)
+            if hasattr(self.engine, "add_exclusion"): self.engine.add_exclusion(d)
+            self.log.info(f"Đã thêm loại trừ: {d}")
+
+    def del_exclusion(self):
+        for i in reversed(self.exclbox.curselection()):
+            item = self.exclbox.get(i)
+            if item.startswith("[tự bảo vệ]"):
+                messagebox.showinfo("SentinelX", "Không thể bỏ loại trừ tự bảo vệ của SentinelX.")
+                continue
+            if item in self.cfg["exclusions"]: self.cfg["exclusions"].remove(item)
+            self.exclbox.delete(i)
+        self.cfg.save()
+
     def del_watch(self):
         for i in reversed(self.watchbox.curselection()): self.watchbox.delete(i)
 
@@ -628,11 +914,26 @@ class SentinelX(tk.Tk):
         self.logbox.insert("end", f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}\n", level)
         self.logbox.see("end")
 
+    def security_score(self):
+        s = 40
+        if self.guard.active: s += 25
+        if self.cfg["heuristics"]: s += 10
+        if self.applock.active: s += 10
+        if self.cfg["auto_update"]: s += 5
+        if updater.is_admin(): s += 10
+        if self.session_detected and self.session_removed == self.session_detected: s += 0
+        return min(s, 100)
+
     def animate(self):
         self.gauge.tick()
+        if hasattr(self, "score_line"):
+            sc = self.security_score()
+            self.score_line.config(text=f"Điểm bảo mật: {sc}/100",
+                                   fg=C["accent"] if sc >= 85 else (C["warn"] if sc >= 60 else C["danger"]))
         badge = ("● REALTIME ĐANG BẬT\n" if self.guard.active else "○ REALTIME ĐANG TẮT\n")
         badge += f"Đã kiểm tra: {self.guard.checked}\nĐã chặn: {self.guard.blocked}\n"
-        badge += f"CSDL: {getattr(self, 'sig_version', '?')}"
+        badge += f"CSDL: {getattr(self, 'sig_version', '?')}\n"
+        badge += ("◈ APP LOCK: BẬT (%d app)" % len(self.applock.apps())) if self.applock.active else "◈ APP LOCK: TẮT"
         self.guard_badge.config(text=badge, fg=C["accent"] if self.guard.active else C["danger"])
         self.after(60, self.animate)
 
@@ -645,6 +946,8 @@ class SentinelX(tk.Tk):
 
     def on_close(self):
         self.guard.stop(); self.engine.scan_stop(); self.cfg.save()
+        if self.applock.active:
+            self.applock._stop.set()
         self.log.info("Thoát SentinelX")
         self.destroy()
 
